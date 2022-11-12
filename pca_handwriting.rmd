@@ -1,0 +1,106 @@
+---
+title: "R Notebook"
+output: html_notebook
+---
+
+Load the data using rhdf5
+```{r}
+data_train <- read.table("~/Downloads/zip.train.gz")
+x_train <- data_train[,2:ncol(data_train)]
+y_train <- data_train[,1]
+```
+
+Select for illustration only the data consisting of threes, and then 
+decompose to get the principal components:
+
+```{r}
+x_threes <- x_train[y_train == 3, ]
+pc <- prcomp(x_threes[,1:ncol(x_threes)], center = F, scale. = F, retx = TRUE, rank. = 2)
+pca_predictions <- apply(pc$rotation, 2, function (x) x %*% t(as.matrix(x_train)))
+pca_predictions[1:10,]
+```
+As an example of the first two principal components, show two transformed threes.
+```{r}
+res_img_1 <- pca_predictions[1,1] %*% pc$rotation[,1]
+
+res_img_2 <- pca_predictions[1,2] %*% pc$rotation[,2]
+res_img_1 <- matrix(res_img_1[1,1:ncol(res_img_1)], 16, 16, byrow=T)
+res_img_2 <- matrix(res_img_2[1,1:ncol(res_img_2)], 16, 16, byrow=T)
+image(t(apply(res_img_1, 2, rev)), col=grey(seq(0,1,length=256)))
+image(t(apply(res_img_2, 2, rev)), col=grey(seq(0,1,length=256)))
+```
+Prediction on the basis of this has the form
+$f(\lambda) = \bar{x} + \lambda_1 v_1 + \lambda_2 v_2$
+
+Now to calculate the quantile points at 5%, 25%, 50%, 75%, 95%
+
+```{r}
+trans_data_quantiles <- apply(pca_predictions, 2, function(x) quantile(x, c(0.05, 0.25, 0.5, 0.75, 0.95)))
+plot(x = pca_predictions[,1], y = pca_predictions[,2])
+abline(v=(trans_data_quantiles[,1]), col="lightgray", lty="dotted")
+abline(h=(trans_data_quantiles[,2]), col="lightgray", lty="dotted")
+```
+
+And find the closest points in the projected data to these quantiles, and plot these.
+```{r}
+library(wordspace)
+get_nn <- function(x, y){
+  temp_res <- apply(y,1, function(z) rowNorms(sweep(x, 2, z)), simplify =T)
+  apply(temp_res, 2, which.min)
+}
+```
+
+```{r}
+grid <- t(expand.grid(trans_data_quantiles[,1], trans_data_quantiles[,2]))
+res_list <- get_nn(pc$x, t(grid))
+m<- as.matrix(x_threes[res_list, 1:ncol(x_threes)])
+images <- lapply(split(m, row(m)), function(x) t(apply(matrix(x, 16, 16, byrow=T), 2, rev)))
+img <- do.call(rbind, lapply(split(images[1:25], 1:5), function(x) do.call(cbind, x)))
+image(img, col=grey(seq(0,1,length=100)))
+```
+Alternative using a kernel for higher dimensional feature space is kernel pca
+However this can not be visualized as above
+
+```{r}
+library(kernlab)
+pc_kernel <-kpca((as.matrix(x_threes)), kernel = "rbfdot", kpar = list(sigma = 0.5*16**2),
+    features = 2, th = 1e-4, na.action = na.omit)
+```
+
+
+Now train a model on the first two PC components
+
+```{r}
+pc <- prcomp(x_train, retx = TRUE, rank. = 20)
+pc_data <- cbind(pc$x, y_train)
+lm_pca <- lm(y_train ~ ., data.frame(pc_data))
+summary(lm_pca)
+
+```
+Predict
+```{r}
+data_test <- read.table("~/Downloads/zip.test.gz")
+x_test <- data_test[,2:ncol(data_test)]
+y_test <- data_test[,1]
+```
+
+```{r}
+x_test_pca <- predict(pc, newdata = x_test)
+y_pred <- predict(lm_pca, data.frame(x_test_pca))
+mean((y_pred - y_test)^2)
+```
+
+
+```{r}
+pc_kernel <-kpca((as.matrix(x_train)), kernel = "rbfdot", kpar = list(sigma = 0.5*16**2),
+    features = 20, th = 1e-4, na.action = na.omit)
+pc_kernel_data <- cbind(pc_kernel@rotated, y_train)
+lm_kpca <- lm(y_train ~ ., data.frame(pc_kernel_data))
+```
+
+```{r}
+x_test_kpca <- data.frame(predict(pc_kernel, as.matrix(x_test)))
+colnames(x_test_kpca) <- colnames(data.frame(pc_kernel_data))[1:20]
+y_pred_kpca <- predict(lm_kpca, x_test_kpca)
+mean((y_pred_kpca - y_test)^2)
+```
