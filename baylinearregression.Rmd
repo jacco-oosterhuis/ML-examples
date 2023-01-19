@@ -1,0 +1,222 @@
+---
+title: "baylinearregression"
+output: html_document
+date: "2023-01-08"
+---
+
+```{r setup, include=FALSE}
+library(MASS)
+library(gridExtra)
+library(ggplot2)
+library(ellipse)
+library(plyr)
+```
+
+## R Markdown
+
+This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+
+When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
+
+Create the train data with some noise
+
+```{r}
+set.seed(50)
+x <- matrix(runif(600, min = -1, max = 1))
+f <- function(x, a1, a2){a1 + a2 * x}
+noise <- rnorm(600, mean = 0, sd = 0.2)
+target <- f(x, a1 = -0.3, a2 = 0.5) + noise
+```
+
+### Setup
+Create the design matrix as powers
+```{r}
+phi <- function(x){
+  t(mapply((function (x) x^(0:1)), x))
+}
+
+X <- phi(x)
+```
+
+Setup parameters of noise distribution
+```{r}
+# alpha is mean of noise
+# beta is variance of noise
+alpha <- 0.0
+beta <- 2.0
+```
+
+Initial mode of 0, std and variance of 1 of the prior on $w$
+```{r}
+Sigma <- diag(dim(X)[2]) 
+
+mode <- rep(0, dim(X)[2])
+```
+
+#### Construct implied prior on f_x
+
+Construct samples of the weights, and xtest point to predict the learned function
+
+```{r}
+xtest <- seq(-1,1,length.out = 100)
+
+weight.grid <- expand.grid(s.1 = seq(-4, 4, length.out=200), s.2 = seq(-4, 4, length.out=200))
+
+q.samp <- cbind(weight.grid, prob = mvtnorm::dmvnorm(weight.grid, mean = mode, sigma = Sigma))
+
+```
+
+Plot the distribution over $w$ before observing any data.
+This will give some warning for elements outside of the plot
+
+```{r prior distribution}
+samples1 <- mvtnorm::rmvnorm(10, mean = mode, sigma = Sigma)
+
+plot1 <- ggplot(q.samp, aes(x=s.1, y=s.2)) + 
+    geom_raster(aes(fill = prob)) +
+    coord_fixed(xlim = c(-4, 4), ylim = c(-4, 4), ratio = 1)
+plot1 <- plot1 + geom_point(data = data.frame(samples1), aes(x=X1, y = X2))
+plot1
+f_mode <- (phi(xtest)) %*% mode
+f_var <- (phi(xtest)) %*% Sigma %*% t(phi(xtest))
+predictive_dataset <- data.frame(cbind(xtest, f_mode, diag(f_var)))
+plot1_2 <- ggplot(color = "green", data = predictive_dataset) + geom_line(aes(x = xtest, y = V2)) + geom_ribbon(data = predictive_dataset, aes(x= xtest, y = V2, ymin = V2- 2*V3, ymax = V2 + 2*V3, 
+                                             ),
+              alpha = 0.2) 
+for (i in 1:nrow(samples1)){
+    plot1_2 <- plot1_2 + stat_function(fun = function(x, j) j[1] + j[2] * x, args = list(j=samples1[i,]))
+}
+plot1_2
+
+```
+Observe some new data
+
+```{r samping points}
+sampling_n <- 20
+set.seed(12345)
+samples <- sample(1:nrow(X), sampling_n)
+x_sample <- X[samples,]
+y_sample <- target[samples,]
+
+```
+
+
+```{r prior after observation}
+precision <- c(alpha,alpha) + beta * (t(x_sample) %*%x_sample)
+mode <- ginv(precision) %*% (beta * t(x_sample) %*% y_sample)
+p.samp <- cbind(weight.grid, prob = mvtnorm::dmvnorm(weight.grid, mean = mode, sigma = ginv(precision)))
+plot2 <- ggplot(p.samp, aes(x=s.1, y=s.2)) + 
+    geom_raster(aes(fill = prob)) +
+    coord_fixed(xlim = c(-4, 4), ylim = c(-4, 4), ratio = 1)
+samples2 <- mvtnorm::rmvnorm(10, mean = mode, sigma = ginv(precision))
+
+
+plot2_1 <- ggplot(data = data.frame(x = 0), mapping = aes(x = x))
+for (i in 1:nrow(samples2)){
+    plot2_1 <- plot2_1 + stat_function(fun = function(x, j) j[1] + j[2] * x, args = list(j=samples2[i,]))
+}
+plot2_1 <- plot2_1 + xlim(-1,1) + ylim(-4,4)
+
+plot2_1 <- plot2_1 + geom_point(data = data.frame(x = x[samples], y = y_sample), 
+             mapping = aes(x = x, y= y), 
+             size = 1)
+
+plot2
+plot2_1
+```
+Now to sample from the predictive distribution:
+
+
+```{r predictive distribution}
+M <- x_sample %*% mode
+m <- (phi(xtest)) %*% mode
+kXX <- (x_sample) %*% Sigma %*% t(x_sample)
+kxx <- (phi(xtest)) %*% Sigma %*% t(phi(xtest))
+G <- kXX + beta * diag(1, dim(x_sample)[1])
+G <- chol(G)
+kxX <- (phi(xtest)) %*% Sigma %*% t(x_sample)
+A <- t(solve(t(G) %*% G, t(kxX)))
+mode_pred <- t(m) + t(A %*% (y_sample - M))
+var_pred <- kxx - A %*% t(kxX)
+p.samp <- mvtnorm::rmvnorm(5,mean = mode_pred, sigma = var_pred) 
+```
+
+
+### Plot the predictive distribution
+
+With confidence bands and samples of predictive distribution
+
+```{r pressure, echo=FALSE}
+predictive_dataset <- data.frame(cbind(xtest, t(mode_pred), sqrt(diag(var_pred))))
+data.grid <- data.frame(x = x_sample, y= y_sample)
+
+plot1 <- ggplot(data.grid, aes(x = x.2, y = y)) + geom_line(color = "green", data = predictive_dataset, aes(x = xtest, y = V2)) + geom_ribbon(data = predictive_dataset, aes(x= xtest, y = V2, ymin = V2- 2*V3, ymax = V2 + 2*V3, 
+                                             ),
+              alpha = 0.2) +xlim(-1,1) + ylim(-4,4)
+for (i in 1:nrow(p.samp)){
+  tmp <- data.frame(y = p.samp[i,])
+  tmp$indx = xtest
+  
+
+  plot1 <- plot1 + geom_line(data = tmp, aes(x = indx, y= y)) 
+}
+plot1 <- plot1 + geom_point(data = data.frame(x = x[samples], y = y_sample), 
+             mapping = aes(x = x, y= y), 
+             size = 1)
+plot1
+```
+
+## Different feature functions:
+
+```{r gaussian}
+ phi <- function(x){
+  n<- length(x)
+  basis_u = seq(-1,1,length.out = 9)
+  basis_u = t(replicate(n, basis_u))
+  x_matrix <- matrix(x, nrow = n, ncol = 9)
+  a <- cbind(rep(1, n), exp(-0.5* (x_matrix- basis_u) ** 2 / (0.1**2)))
+  a
+
+ }
+X <- phi(x)
+Sigma <- diag(dim(X)[2]) 
+
+mode <- rep(0, dim(X)[2])
+
+sampling_n <- 20
+set.seed(12345)
+samples <- sample(1:nrow(X), sampling_n)
+x_sample <- X[samples,]
+y_sample <- target[samples,]
+
+M <- x_sample %*% mode
+m <- (phi(xtest)) %*% mode
+kXX <- (x_sample) %*% Sigma %*% t(x_sample)
+kxx <- (phi(xtest)) %*% Sigma %*% t(phi(xtest))
+G <- kXX + beta * diag(1, dim(x_sample)[1])
+G <- chol(G)
+kxX <- (phi(xtest)) %*% Sigma %*% t(x_sample)
+A <- t(solve(t(G) %*% G, t(kxX)))
+mode_pred <- t(m) + t(A %*% (y_sample - M))
+var_pred <- kxx - A %*% t(kxX)
+p.samp <- mvtnorm::rmvnorm(5,mean = mode_pred, sigma = var_pred) 
+
+predictive_dataset <- data.frame(cbind(xtest, t(mode_pred), sqrt(diag(var_pred))))
+data.grid <- data.frame(x = x_sample, y= y_sample)
+
+plot1 <- ggplot(data.grid, aes(x = x.2, y = y)) + geom_line(color = "green", data = predictive_dataset, aes(x = xtest, y = V2)) + geom_ribbon(data = predictive_dataset, aes(x= xtest, y = V2, ymin = V2- 2*V3, ymax = V2 + 2*V3, 
+                                             ),
+              alpha = 0.2) +xlim(-1,1) + ylim(-4,4)
+for (i in 1:nrow(p.samp)){
+  tmp <- data.frame(y = p.samp[i,])
+  tmp$indx = xtest
+  
+
+  plot1 <- plot1 + geom_line(data = tmp, aes(x = indx, y= y)) 
+}
+plot1 <- plot1 + geom_point(data = data.frame(x = x[samples], y = y_sample), 
+             mapping = aes(x = x, y= y), 
+             size = 1)
+plot1
+
+```
